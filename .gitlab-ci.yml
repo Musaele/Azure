@@ -1,0 +1,89 @@
+stages:
+  - build
+  - deploy
+  - code_analysis
+  - integration_test
+  - undeploy
+
+variables: 
+  ORG: 'abacus-apigee-demo'
+  PROXY_NAME: 'test-call'
+  APIGEE_ENVIRONMENT: 'dev2'
+  filename: 'NoTargetProxy_GET_Req_Fail.postman_collection.json'
+
+before_script:
+  - apt-get update -qy
+  - apt-get install -y curl jq maven npm
+
+build-job-1:
+  stage: build
+  script:
+    - |
+      # Install required dependencies
+      apt-get install -y gnupg
+      curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+      echo "deb https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+      apt-get update && apt-get install -y google-cloud-sdk
+      
+      # Download secure files
+      # SECURE_FILES_DOWNLOAD
+      curl --silent "https://gitlab.com/gitlab-org/incubation-engineering/mobile-devops/download-secure-files/-/raw/main/installer" | bash
+
+      # Ensure proper line endings for the script
+      sed -i 's/\r$//' ./scripts/revision1.sh
+      
+      # Source the script and set environment variables
+      source ./scripts/revision1.sh $ORG $PROXY_NAME $APIGEE_ENVIRONMENT
+      echo "access_token=$access_token" >> build.env
+      echo "stable_revision_number=$stable_revision_number" >> build.env
+
+  artifacts:
+    reports:
+      dotenv: build.env
+
+deploy:
+  stage: deploy
+  script:
+    - |
+      echo "stable revision at stage deploy: $stable_revision_number"
+      mvn clean install -f $CI_PROJECT_DIR/$PROXY_NAME/pom.xml -P$APIGEE_ENVIRONMENT -Dorg=$ORG -Dbearer=$access_token
+  needs:
+    - build-job-1
+
+policy_code_analysis:
+  stage: code_analysis
+  script:
+    - mkdir -p ./reports
+    - npm install -g apigeelint
+    - apigeelint -V
+    - apigeelint -s test-call/apiproxy -f table.js --excluded BN003 | tee ./reports/index.html
+  artifacts:
+    paths:
+      - ./reports/index.html
+  when: always
+
+integration_test:
+  stage: integration_test
+  script:
+    - |
+      echo "stable revision at stage integration_test: $stable_revision_number"
+      bash ./scripts/integration.sh $ORG $filename
+  artifacts:
+    reports:
+      junit: junitReport.xml
+  when: on_success
+  needs:
+    - build-job-1
+    - deploy
+
+undeploy:
+  stage: undeploy
+  script:
+    - |
+      echo "stable revision at stage undeploy: $stable_revision_number"
+      cd $CI_PROJECT_DIR  # Set the working directory to the project root
+      bash ./scripts/undeploy.sh $ORG $access_token $PROXY_NAME $stable_revision_number $APIGEE_ENVIRONMENT
+  when: on_failure
+  needs:
+    - build-job-1
+    - integration_test
